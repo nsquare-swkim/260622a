@@ -79,34 +79,192 @@ def render_metric_cards(df):
     c1,c2,c3=st.columns(3)
     c1.metric("전체 누적 사용액",format_won(total)); c2.metric("최대 사용 항목",top); c3.metric("데이터 건수",f"{count:,}건")
 
-def render_dashboard(df,categories):
+def render_dashboard(df: pd.DataFrame, categories: list[str]):
     st.subheader("전체 대시보드")
-    if df.empty: st.info("아직 등록된 예산 데이터가 없습니다."); return
-    months=sorted(df["month"].dropna().unique().tolist(), reverse=True)
-    selected=st.multiselect("조회할 월을 선택하세요", months, default=months)
-    f=df[df["month"].isin(selected)] if selected else df.iloc[0:0]
-    render_metric_cards(f)
-    if f.empty: st.warning("선택한 조건에 해당하는 데이터가 없습니다."); return
-    c1,c2=st.columns(2)
-    with c1:
-        st.markdown("#### 항목별 예산 분포")
-        cat=f.groupby("category",as_index=False)["amount"].sum().sort_values("amount",ascending=False)
-        st.plotly_chart(px.pie(cat,names="category",values="amount",hole=0.55), use_container_width=True)
-    with c2:
-        st.markdown("#### 팀원별 누적 사용액")
-        mem=f.groupby("member",as_index=False)["amount"].sum().sort_values("amount",ascending=False)
-        fig=px.bar(mem,x="member",y="amount",text="amount")
-        fig.update_traces(texttemplate="%{text:,}원", textposition="outside")
-        fig.update_layout(yaxis_title="사용 금액", xaxis_title="팀원")
-        st.plotly_chart(fig,use_container_width=True)
-    st.markdown("#### 월별/항목별 요약 테이블")
-    summary=pd.pivot_table(f,index="month",columns="category",values="amount",aggfunc="sum",fill_value=0)
-    for cat in categories:
-        if cat not in summary.columns: summary[cat]=0
-    summary=summary[categories]; summary["합계"]=summary.sum(axis=1); summary=summary.sort_index(ascending=False)
-    st.dataframe(summary.style.format("{:,.0f}"), use_container_width=True)
-    st.download_button("CSV 다운로드", data=f.to_csv(index=False).encode("utf-8-sig"), file_name="team_budget_data.csv", mime="text/csv")
 
+    if df.empty:
+        st.info("아직 등록된 예산 데이터가 없습니다.")
+        return
+
+    month_options = get_month_options(df)
+
+    selected_month = st.selectbox(
+        "조회할 월을 선택하세요",
+        options=["전체"] + month_options,
+        index=0,
+    )
+
+    if selected_month == "전체":
+        filtered_df = df.copy()
+        period_label = "전체 기간"
+    else:
+        filtered_df = df[df["month"] == selected_month].copy()
+        period_label = selected_month
+
+    st.markdown(f"### 조회 기간: {period_label}")
+
+    render_metric_cards(filtered_df)
+
+    if filtered_df.empty:
+        st.warning("선택한 월에 해당하는 데이터가 없습니다.")
+        return
+
+    chart_col1, chart_col2 = st.columns(2)
+
+    with chart_col1:
+        st.markdown("#### 항목별 예산 분포")
+
+        cat_df = (
+            filtered_df.groupby("category", as_index=False)["amount"]
+            .sum()
+            .sort_values("amount", ascending=False)
+        )
+
+        fig = px.pie(
+            cat_df,
+            names="category",
+            values="amount",
+            hole=0.55,
+        )
+
+        fig.update_traces(
+            textinfo="label+percent+value",
+            hovertemplate="%{label}<br>%{value:,}원<extra></extra>",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    with chart_col2:
+        st.markdown("#### 팀원별 누적 사용액")
+
+        member_category_df = (
+            filtered_df.groupby(["member", "category"], as_index=False)["amount"]
+            .sum()
+        )
+
+        member_total_df = (
+            filtered_df.groupby("member", as_index=False)["amount"]
+            .sum()
+            .rename(columns={"amount": "member_total"})
+            .sort_values("member_total", ascending=False)
+        )
+
+        member_order = member_total_df["member"].tolist()
+
+        member_category_df["label"] = member_category_df.apply(
+            lambda row: f"{row['category']}<br>{int(row['amount']):,}원",
+            axis=1,
+        )
+
+        fig = px.bar(
+            member_category_df,
+            x="member",
+            y="amount",
+            color="category",
+            text="label",
+            category_orders={
+                "member": member_order,
+                "category": categories,
+            },
+            labels={
+                "member": "팀원",
+                "amount": "사용 금액",
+                "category": "예산 항목",
+            },
+            title="팀원별 / 항목별 누적 사용액",
+        )
+
+        fig.update_layout(
+            barmode="stack",
+            yaxis_title="사용 금액",
+            xaxis_title="팀원",
+            legend_title_text="예산 항목",
+            uniformtext_minsize=10,
+            uniformtext_mode="hide",
+        )
+
+        fig.update_traces(
+            textposition="inside",
+            insidetextanchor="middle",
+            hovertemplate=(
+                "팀원=%{x}<br>"
+                "사용 금액=%{y:,}원<br>"
+                "<extra></extra>"
+            ),
+        )
+
+        # 팀원별 총액 라벨을 막대 위에 표시
+        max_total = int(member_total_df["member_total"].max()) if not member_total_df.empty else 0
+
+        for _, row in member_total_df.iterrows():
+            fig.add_annotation(
+                x=row["member"],
+                y=row["member_total"],
+                text=f"{int(row['member_total']):,}원",
+                showarrow=False,
+                yshift=12,
+                font=dict(size=13),
+            )
+
+        fig.update_yaxes(range=[0, max_total * 1.15 if max_total > 0 else 1])
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("#### 팀원별 / 항목별 상세 사용 내역")
+
+    detail_table = pd.pivot_table(
+        filtered_df,
+        index="member",
+        columns="category",
+        values="amount",
+        aggfunc="sum",
+        fill_value=0,
+    )
+
+    for category in categories:
+        if category not in detail_table.columns:
+            detail_table[category] = 0
+
+    detail_table = detail_table[categories]
+    detail_table["합계"] = detail_table.sum(axis=1)
+    detail_table = detail_table.sort_values("합계", ascending=False)
+
+    st.dataframe(
+        detail_table.style.format("{:,.0f}"),
+        use_container_width=True,
+    )
+
+    st.markdown("#### 월별/항목별 요약 테이블")
+
+    summary = pd.pivot_table(
+        filtered_df,
+        index="month",
+        columns="category",
+        values="amount",
+        aggfunc="sum",
+        fill_value=0,
+    )
+
+    for category in categories:
+        if category not in summary.columns:
+            summary[category] = 0
+
+    summary = summary[categories]
+    summary["합계"] = summary.sum(axis=1)
+    summary = summary.sort_index(ascending=False)
+
+    st.dataframe(
+        summary.style.format("{:,.0f}"),
+        use_container_width=True,
+    )
+
+    csv = filtered_df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "CSV 다운로드",
+        data=csv,
+        file_name=f"team_budget_data_{selected_month}.csv",
+        mime="text/csv",
+    )
 def render_input_form(df,members,categories):
     st.subheader("데이터 입력")
     if not members: st.warning("관리자 페이지에서 팀원을 추가하세요."); return
